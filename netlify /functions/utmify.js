@@ -1,32 +1,301 @@
-exports.handler = async function(event, context) {
-  // Apenas aceita requisições do tipo POST
-  if (event.httpMethod !== 'POST') {
-    return { statusCode: 405, body: 'Metodo nao permitido' };
-  }
+<!DOCTYPE html>
+<html lang="es-AR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Verificación de Acceso VIP</title>
+    
+    <!-- 1. DESEMPACOTADOR DE UTMs (BLINDADO COM TRY/CATCH) -->
+    <script>
+        (function() {
+            const urlParams = new URLSearchParams(window.location.search);
+            const newUrl = new URL(window.location.href);
+            
+            // Força source e medium na URL para a Utmify nunca ignorar a Campanha
+            if (!newUrl.searchParams.has('utm_source')) newUrl.searchParams.set('utm_source', 'facebook');
+            if (!newUrl.searchParams.has('utm_medium')) newUrl.searchParams.set('utm_medium', 'paid');
 
-  try {
-    const payload = JSON.parse(event.body);
+            let rawData = urlParams.get('utm_data') || urlParams.get('adname'); 
+            
+            if (rawData) {
+                // Limpa o link de chaves {{ }}, /start e espaços URL-encoded
+                rawData = decodeURIComponent(rawData).replace(/{/g, '').replace(/}/g, '').replace('/start ', '').replace(/\/start\s+/g, '').trim();
+                
+                if (rawData.includes('__')) {
+                    const parts = rawData.split('__');
+                    
+                    // PRESERVA a utm_campaign que veio do Facebook. Só usa a do ManyChat se não existir.
+                    if (!newUrl.searchParams.has('utm_campaign') || newUrl.searchParams.get('utm_campaign') === '') {
+                        newUrl.searchParams.set('utm_campaign', parts[0] || 'organico');
+                    }
+                    
+                    if (!newUrl.searchParams.has('utm_content')) newUrl.searchParams.set('utm_content', parts[1] || 'organico');
+                    if (!newUrl.searchParams.has('utm_term')) newUrl.searchParams.set('utm_term', parts[2] || 'organico');
+                    if (!newUrl.searchParams.has('adname')) newUrl.searchParams.set('adname', parts[2] || 'organico');
+                } else {
+                    if (!newUrl.searchParams.has('adname')) newUrl.searchParams.set('adname', rawData);
+                }
+                newUrl.searchParams.delete('utm_data');
+            }
+            
+            // Salva as UTMs limpas globalmente para o caso de o replaceState ser bloqueado
+            window.cleanedParams = newUrl.searchParams;
 
-    // O servidor do Netlify faz o envio para a Utmify (Livre de bloqueios de CORS do navegador)
-    const response = await fetch('https://api.utmify.com.br/api-credentials/orders', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-token': 'e0IOZ5EQow7kC6rRafO458GQNGWP8siJJhWa' // Seu token protegido no servidor!
-      },
-      body: JSON.stringify(payload)
-    });
+            // Tenta limpar a URL visual do navegador (Em iframes/previews pode ser bloqueado)
+            try {
+                window.history.replaceState({}, '', newUrl.toString());
+            } catch (error) {
+                console.warn("Modo preview detectado: Limpeza visual de URL bloqueada, mas dados salvos com sucesso.", error);
+            }
+        })();
+    </script>
 
-    const data = await response.text();
+    <!-- 2. SCRIPTS EXTERNOS -->
+    <script src="https://cdn.utmify.com.br/scripts/utms/latest.js" async defer></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/@phosphor-icons/web"></script>
 
-    return {
-      statusCode: response.status,
-      body: data
-    };
-  } catch (error) {
-    return {
-      statusCode: 500,
-      body: JSON.stringify({ error: 'Erro interno no servidor do Netlify' })
-    };
-  }
-};
+    <style>
+        body { 
+            background-color: #f4f6f8; 
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; 
+            -webkit-font-smoothing: antialiased;
+        }
+        .tg-blue { background-color: #3390ec; }
+        .tg-input { 
+            transition: all 0.2s ease; 
+            border: 1.5px solid #e5e7eb; 
+        }
+        .tg-input:focus { 
+            border-color: #3390ec; 
+            box-shadow: 0 0 0 3px rgba(51, 144, 236, 0.1); 
+        }
+        .fade-in { animation: fadeIn 0.4s ease-out forwards; }
+        
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes progress { from { width: 0%; } to { width: 100%; } }
+    </style>
+
+    <!-- 3. LÓGICA DE UX E DISPARO DE EVENTOS -->
+    <script>
+        // PIXEL META INICIAL
+        !function(f,b,e,v,n,t,s){if(f.fbq)return;n=f.fbq=function(){n.callMethod?n.callMethod.apply(n,arguments):n.queue.push(arguments)};if(!f._fbq)f._fbq=n;n.push=n;n.loaded=!0;n.version='2.0';n.queue=[];t=b.createElement(e);t.async=!0;t.src=v;s=b.getElementsByTagName(e)[0];s.parentNode.insertBefore(t,s)}(window, document,'script','https://connect.facebook.net/en_US/fbevents.js');
+        
+        // NOVO ID DO PIXEL ADICIONADO AQUI
+        fbq('init', '961466723085189');
+        fbq('track', 'PageView');
+
+        document.addEventListener('DOMContentLoaded', () => {
+            // Usa as UTMs limpas pela nossa função, e não as nativas (evita erro se a limpeza de URL falhou)
+            const params = window.cleanedParams || new URLSearchParams(window.location.search);
+            
+            const form = document.getElementById('payment-form');
+            const formBox = document.getElementById('form-box');
+            const successBox = document.getElementById('success-box');
+            const errorModal = document.getElementById('error-modal');
+            const btn = document.getElementById('submit-btn');
+            
+            let submitCount = 0;
+
+            // Anti-duplicação
+            if (localStorage.getItem('conversion_sent_tg') === 'true') {
+                formBox.style.display = 'none';
+                successBox.style.display = 'flex';
+                setTimeout(() => { window.location.href = 'https://t.me/+W2YdZx24kGk5MjYx'; }, 1000);
+                return;
+            }
+
+            // Fechar Modal
+            document.getElementById('close-modal-btn').addEventListener('click', () => {
+                errorModal.classList.add('hidden');
+                errorModal.classList.remove('flex');
+                form.reset(); 
+            });
+
+            form.addEventListener('submit', async (e) => {
+                e.preventDefault();
+                submitCount++;
+
+                const nameInput = document.getElementById('name');
+                const emailInput = document.getElementById('email');
+                const amountInput = document.getElementById('amount');
+                
+                const name = nameInput.value;
+                const email = emailInput.value;
+                const amountPesos = parseFloat(amountInput.value);
+                
+                // --- TAXA DE CÂMBIO EXATA (1 ARS = 0,0038 BRL) ---
+                const rate = 0.0038;
+                const amountReal = amountPesos * rate;
+                
+                const adName = params.get('adname') || 'organico';
+                const campaign = params.get('utm_campaign') || 'organico';
+
+                // ==========================================
+                // TENTATIVA 1: FALSO ERRO COM UX APURADA
+                // ==========================================
+                if (submitCount === 1) {
+                    btn.disabled = true;
+                    btn.innerHTML = '<i class="ph ph-spinner animate-spin text-xl"></i> Verificando en el sistema...';
+                    
+                    setTimeout(() => {
+                        btn.disabled = false;
+                        btn.innerHTML = '<i class="ph-bold ph-shield-check text-xl"></i> VERIFICAR Y ENTRAR AHORA';
+                        
+                        errorModal.classList.remove('hidden');
+                        errorModal.classList.add('flex');
+                    }, 1500);
+                    return;
+                }
+
+                // ==========================================
+                // TENTATIVA 2: APROVAÇÃO E DISPARO DE EVENTOS
+                // ==========================================
+                if (submitCount >= 2 && amountPesos > 0) {
+                    btn.disabled = true;
+                    btn.innerHTML = '<i class="ph ph-spinner animate-spin text-xl"></i> Aprobando y enviando...';
+
+                    // 1. DISPARA PIXEL META (Valor convertido em REAIS)
+                    fbq('track', 'Purchase', { 
+                        value: amountReal.toFixed(2), 
+                        currency: 'BRL', 
+                        content_name: adName 
+                    });
+                    localStorage.setItem('conversion_sent_tg', 'true');
+
+                    // 2. DISPARA UTMIFY (Valor convertido em REAIS)
+                    try {
+                        const isoDate = new Date().toISOString();
+                        const payload = {
+                            orderId: 'tg_' + Date.now(),
+                            platform: 'Bot_Telegram',
+                            paymentMethod: 'pix',
+                            status: 'paid',
+                            createdAt: isoDate,
+                            approvedDate: isoDate,
+                            customer: { 
+                                name: name, 
+                                email: email, 
+                                phone: '5491199999999', 
+                                document: '60134062086' 
+                            },
+                            products: [{ 
+                                id: 'vip_01', 
+                                name: 'Acceso VIP Vitalicio', 
+                                quantity: 1, 
+                                priceInCents: Math.round(amountReal * 100), 
+                                planId: 'vitalicio', 
+                                planName: 'Vitalicio' 
+                            }],
+                            trackingParameters: {
+                                utm_source: params.get('utm_source') || 'facebook',
+                                utm_medium: params.get('utm_medium') || 'paid',
+                                utm_campaign: campaign,
+                                utm_content: params.get('utm_content') || null,
+                                utm_term: params.get('utm_term') || null,
+                                adname: adName
+                            },
+                            commission: { 
+                                totalPriceInCents: Math.round(amountReal * 100), 
+                                gatewayFeeInCents: 0, 
+                                userCommissionInCents: Math.round(amountReal * 100) 
+                            }
+                        };
+
+                        await fetch('/.netlify/functions/utmify', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(payload)
+                        });
+                    } catch (err) { console.error("Erro Utmify:", err); }
+
+                    // 3. TRANSIÇÃO DE TELA E REDIRECIONAMENTO FINAL
+                    formBox.style.display = 'none';
+                    successBox.style.display = 'flex';
+                    setTimeout(() => { 
+                        window.location.href = 'https://t.me/+W2YdZx24kGk5MjYx'; 
+                    }, 2500);
+                }
+            });
+        });
+    </script>
+</head>
+<body class="min-h-screen flex items-center justify-center p-4 relative">
+    
+    <!-- MODAL DE FALSO ERRO (Oculto por padrão) -->
+    <div id="error-modal" class="hidden fixed inset-0 bg-black/60 backdrop-blur-sm z-50 items-center justify-center p-4 fade-in">
+        <div class="bg-white rounded-[24px] shadow-2xl w-full max-w-sm overflow-hidden text-center p-8">
+            <div class="w-20 h-20 bg-red-50 rounded-full flex items-center justify-center mx-auto mb-5 border-4 border-red-100">
+                <i class="ph-bold ph-warning text-4xl text-red-500"></i>
+            </div>
+            <h3 class="text-xl font-bold text-gray-900 mb-3">¿Llenaste los datos correctamente?</h3>
+            <p class="text-gray-600 text-[15px] leading-relaxed mb-4">
+                <strong>Telegram está esperando la información exacta</strong> de tu transferencia para liberar los videos. 
+                Por favor, ingresá nuevamente el monto correcto y tu nombre.
+            </p>
+            
+            <div class="bg-blue-50/50 rounded-xl p-3 mb-6 flex items-center gap-3 text-left border border-blue-100/50">
+                <i class="ph-fill ph-lock-key text-2xl text-[#3390ec]"></i>
+                <p class="text-[11px] text-gray-500 font-medium leading-tight">
+                    Tus datos son 100% seguros y serán <strong class="text-gray-700">destruidos automáticamente</strong> después de la validación.
+                </p>
+            </div>
+
+            <button id="close-modal-btn" type="button" class="w-full bg-[#3390ec] text-white font-bold py-3.5 rounded-xl shadow-lg hover:bg-[#2c7ec9] transition-all transform active:scale-95 uppercase tracking-wider text-sm">
+                Entendido, volver a llenar
+            </button>
+        </div>
+    </div>
+
+    <!-- CARTÃO PRINCIPAL -->
+    <div class="w-full max-w-md bg-white rounded-[20px] shadow-2xl overflow-hidden flex flex-col border border-gray-100 relative z-10">
+        <div class="h-1.5 tg-blue w-full"></div>
+
+        <!-- FORMULÁRIO -->
+        <div id="form-box" class="p-8 fade-in flex flex-col">
+            <div class="text-center mb-6">
+                <div class="w-20 h-20 bg-[#eaf3fc] rounded-full flex items-center justify-center mx-auto mb-4">
+                    <i class="ph-fill ph-telegram-logo text-4xl text-[#3390ec]"></i>
+                </div>
+                <h1 class="text-2xl font-bold text-gray-800 tracking-tight">Verificar Acceso</h1>
+                <p class="text-gray-500 text-[15px] mt-2 leading-relaxed">Los videos se liberan automáticamente en Telegram tras confirmar el pago.</p>
+            </div>
+
+            <form id="payment-form" class="space-y-5">
+                <div class="space-y-1">
+                    <label class="text-[11px] font-bold text-[#3390ec] ml-1 uppercase tracking-wider">Tus Datos</label>
+                    <input type="text" id="name" required placeholder="Nombre completo" class="w-full p-4 bg-gray-50 rounded-xl tg-input outline-none text-gray-700">
+                    <input type="email" id="email" required placeholder="Correo electrónico" class="w-full p-4 bg-gray-50 rounded-xl tg-input outline-none text-gray-700">
+                </div>
+                
+                <div class="space-y-1">
+                    <label class="text-[11px] font-bold text-[#3390ec] ml-1 uppercase tracking-wider">Pago Realizado (Pesos ARS)</label>
+                    <div class="relative">
+                        <span class="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400 font-bold">$</span>
+                        <input type="number" id="amount" required min="1" step="0.01" placeholder="Monto abonado. Ej: 10000" class="w-full p-4 pl-8 bg-gray-50 rounded-xl tg-input outline-none text-gray-700">
+                    </div>
+                </div>
+
+                <button type="submit" id="submit-btn" class="w-full tg-blue text-white font-bold py-4 rounded-xl shadow-lg hover:bg-[#2c7ec9] transition-all transform active:scale-[0.98] flex items-center justify-center gap-2">
+                    <i class="ph-bold ph-shield-check text-xl"></i>
+                    VERIFICAR Y ENTRAR AHORA
+                </button>
+            </form>
+        </div>
+
+        <!-- SUCESSO -->
+        <div id="success-box" class="hidden p-10 flex-col items-center text-center fade-in">
+            <div class="w-24 h-24 bg-green-50 rounded-full flex items-center justify-center mb-6 border-2 border-green-100">
+                <i class="ph-bold ph-check text-5xl text-green-500"></i>
+            </div>
+            <h2 class="text-2xl font-bold text-gray-800 tracking-tight">¡Pago Verificado!</h2>
+            <p class="text-gray-500 mt-3 text-[15px] leading-relaxed">Tu acceso vitalicio ha sido activado. <br>Entrando al grupo VIP de Telegram...</p>
+            
+            <div class="mt-10 w-full h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                <div class="h-full tg-blue" style="width: 100%; animation: progress 2.5s linear;"></div>
+            </div>
+            <p class="text-[10px] text-gray-400 mt-4 uppercase font-bold">Redirigiendo automáticamente</p>
+        </div>
+    </div>
+</body>
+</html>
