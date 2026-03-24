@@ -12,7 +12,7 @@ exports.handler = async function(event, context) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-api-token': 'NfMiQjhIK71O3ttENTGJAy5x4uRDWxzrK6cG' // Seu token protegido no servidor!
+        'x-api-token': 'e0IOZ5EQow7kC6rRafO458GQNGWP8siJJhWa' // Seu token protegido no servidor!
       },
       body: JSON.stringify(payload)
     });
